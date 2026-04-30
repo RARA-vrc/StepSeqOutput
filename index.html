@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TheLoopRoom → MIDI</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-bright: #79c0ff;
+    --error: #f85149;
+    --ok: #3fb950;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 {
+    margin: 0 0 8px; font-size: 24px;
+    color: var(--accent-bright);
+  }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  textarea {
+    width: 100%; min-height: 140px;
+    background: #0d1117; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; font: 12px/1.5 var(--mono);
+    resize: vertical;
+  }
+  textarea:focus, input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+  .row > div { flex: 1; min-width: 160px; }
+
+  input[type="text"], select {
+    width: 100%;
+    background: #0d1117; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font: 13px/1.4 var(--mono);
+  }
+
+  button {
+    background: var(--accent); color: #0d1117;
+    border: 0; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  button:hover { background: var(--accent-bright); }
+  button:disabled { background: #30363d; color: var(--muted); cursor: not-allowed; }
+
+  #info {
+    font: 13px/1.6 var(--mono);
+    color: var(--text);
+  }
+  #info .key { color: var(--muted); display: inline-block; min-width: 80px; }
+
+  .msg { font-size: 13px; padding: 8px 12px; border-radius: 6px; margin-top: 12px; }
+  .msg.error { background: rgba(248, 81, 73, 0.1); color: var(--error); border: 1px solid rgba(248, 81, 73, 0.3); }
+  .msg.ok    { background: rgba(63, 185, 80, 0.1); color: var(--ok);    border: 1px solid rgba(63, 185, 80, 0.3); }
+
+  footer {
+    margin-top: 32px; font-size: 12px; color: var(--muted); text-align: center;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>TheLoopRoom → MIDI</h1>
+  <p class="sub">
+    VRChat ワールド <strong>TheLoopRoom</strong> の Export ボタンが出力した文字列を貼り付けて、
+    標準 MIDI ファイルとしてダウンロードできます。生成は全部ブラウザ内で完結（送信なし）。
+  </p>
+
+  <div class="panel">
+    <label for="input">Export 文字列 (Base64)</label>
+    <textarea id="input" placeholder="ワールドの Export ボタンが出した文字列をここに貼る (TheLoopRoom export — copy below: の行は無視されます)"></textarea>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label for="bars-mode">バー (小節) の選び方</label>
+        <select id="bars-mode">
+          <option value="auto">自動 (Chain Loop 設定に従う)</option>
+          <option value="custom">カスタム (バンク番号を指定)</option>
+        </select>
+      </div>
+      <div>
+        <label for="bars-custom">カスタム指定 (例: 0,1,2,3)</label>
+        <input id="bars-custom" type="text" placeholder="0,1,2,3" disabled>
+      </div>
+      <div>
+        <label for="filename">ファイル名</label>
+        <input id="filename" type="text" value="loop.mid">
+      </div>
+    </div>
+    <div style="margin-top: 16px;">
+      <button id="download">Download .mid</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="panel">
+    <div id="info">貼り付けると、ここに BPM やバンク数などが表示されます。</div>
+  </div>
+
+  <footer>
+    Self-contained / no server / no tracking.
+    Source: <a href="https://github.com/RARA-vrc/StepSeqOutput" target="_blank" rel="noopener">RARA-vrc/StepSeqOutput</a>
+  </footer>
+
+</div>
+
+<script>
+"use strict";
+
+// ─── Constants ─────────────────────────────────────────────────────────────
+const TICKS_PER_QUARTER = 480;
+const STEPS_PER_BEAT    = 4;
+const TICKS_PER_STEP    = TICKS_PER_QUARTER / STEPS_PER_BEAT;  // 120
+const TOTAL_STEPS       = 16;
+const BANK_COUNT        = 4;
+const BYTES_PER_TRACK   = BANK_COUNT * TOTAL_STEPS;            // 64
+
+const VEL_SOFT = 70;
+const VEL_LOUD = 110;
+
+// Drum (channel 10 = MIDI 9)
+const DRUM_NOTES = {
+  kick:  36,
+  snare: 38,
+  hihat: 42,
+  clap:  39,
+};
+
+// Pitched: pattern byte 1..25 maps to chromatic semitones from these MIDI notes
+const COWBELL_BASE_MIDI = 64; // E4
+const MELODY_BASE_MIDI  = 54; // F#3
+
+const DRUM_DUR    = TICKS_PER_STEP - 5;
+const PITCHED_DUR = TICKS_PER_STEP - 5;
+
+// ─── Base64 → bytes ────────────────────────────────────────────────────────
+function decodeBase64(text) {
+  // Strip whitespace and our own header line if present
+  let cleaned = text.replace(/\s+/g, "");
+  // Try to find the actual Base64 portion (starts after a colon if header was included)
+  const colon = cleaned.indexOf(":");
+  if (colon >= 0 && colon < 64 && /[a-zA-Z0-9+/=]+/.test(cleaned.slice(colon + 1))) {
+    cleaned = cleaned.slice(colon + 1);
+  }
+  // Validate roughly
+  if (!/^[A-Za-z0-9+/=]+$/.test(cleaned)) {
+    throw new Error("Base64 以外の文字が含まれています。");
+  }
+  const binary = atob(cleaned);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// ─── Parse TLR1 export ─────────────────────────────────────────────────────
+function parseExport(b64) {
+  const raw = decodeBase64(b64);
+  if (raw.length < 8) throw new Error(`Data too short (${raw.length} bytes)`);
+  const magic = String.fromCharCode(raw[0], raw[1], raw[2], raw[3]);
+  if (magic !== "TLR1") throw new Error(`不正なマジック '${magic}' (期待値: TLR1)`);
+
+  const bpm   = raw[4] | (raw[5] << 8);
+  const swing = raw[6] / 100;
+  const chain = raw[7];
+
+  const expected = 8 + 6 * BYTES_PER_TRACK;
+  if (raw.length < expected) {
+    throw new Error(`データが切り詰められています: ${raw.length} bytes, 期待値: ${expected}`);
+  }
+
+  let off = 8;
+  const tracks = {};
+  for (const name of ["kick", "snare", "hihat", "clap", "cowbell", "melody"]) {
+    tracks[name] = Array.from(raw.slice(off, off + BYTES_PER_TRACK));
+    off += BYTES_PER_TRACK;
+  }
+  return { bpm, swing, chain, tracks };
+}
+
+// ─── Step timing with swing ────────────────────────────────────────────────
+function stepTickSwung(stepInBar, swing) {
+  const pairIdx    = Math.floor(stepInBar / 2);
+  const posInPair  = stepInBar % 2;
+  const pairStart  = pairIdx * 2 * TICKS_PER_STEP;
+  if (posInPair === 0) return pairStart;
+  return pairStart + Math.round(2 * swing * TICKS_PER_STEP);
+}
+
+// ─── MIDI bytes (low-level, no library) ───────────────────────────────────
+function vlq(value) {
+  // Variable-length quantity (MIDI standard)
+  const out = [value & 0x7F];
+  value >>>= 7;
+  while (value > 0) {
+    out.unshift((value & 0x7F) | 0x80);
+    value >>>= 7;
+  }
+  return out;
+}
+
+function u32be(v) { return [(v >>> 24) & 0xFF, (v >>> 16) & 0xFF, (v >>> 8) & 0xFF, v & 0xFF]; }
+function u16be(v) { return [(v >>> 8) & 0xFF, v & 0xFF]; }
+function ascii(s) { const a = []; for (let i = 0; i < s.length; i++) a.push(s.charCodeAt(i) & 0xFF); return a; }
+
+function trackChunk(events, channel, trackName) {
+  // events: array of {tick, kind:'on'|'off', note, vel}
+  events.sort((a, b) => {
+    if (a.tick !== b.tick) return a.tick - b.tick;
+    if (a.kind === b.kind) return 0;
+    return a.kind === "off" ? -1 : 1; // note-off before note-on at same tick
+  });
+
+  const body = [];
+
+  // Track name meta
+  if (trackName) {
+    body.push(0); // delta
+    body.push(0xFF, 0x03);
+    body.push(...vlq(trackName.length));
+    body.push(...ascii(trackName));
+  }
+
+  let lastT = 0;
+  for (const e of events) {
+    const delta = e.tick - lastT;
+    lastT = e.tick;
+    body.push(...vlq(delta));
+    const status = (e.kind === "on" ? 0x90 : 0x80) | (channel & 0x0F);
+    body.push(status, e.note & 0x7F, e.vel & 0x7F);
+  }
+
+  // End of track
+  body.push(0, 0xFF, 0x2F, 0x00);
+
+  // Wrap in MTrk chunk
+  const out = [];
+  out.push(...ascii("MTrk"));
+  out.push(...u32be(body.length));
+  out.push(...body);
+  return out;
+}
+
+function tempoTrack(bpm) {
+  const usPerQuarter = Math.round(60000000 / bpm);
+  const body = [];
+  body.push(0, 0xFF, 0x03); // track name "TheLoopRoom"
+  const name = "TheLoopRoom";
+  body.push(...vlq(name.length));
+  body.push(...ascii(name));
+  body.push(0, 0xFF, 0x51, 0x03,
+           (usPerQuarter >> 16) & 0xFF,
+           (usPerQuarter >> 8)  & 0xFF,
+           usPerQuarter         & 0xFF);
+  body.push(0, 0xFF, 0x2F, 0x00);
+  const out = [];
+  out.push(...ascii("MTrk"));
+  out.push(...u32be(body.length));
+  out.push(...body);
+  return out;
+}
+
+function buildMidi(parsed, bars) {
+  const { bpm, swing, tracks } = parsed;
+
+  // Drums
+  const drumEvents = [];
+  bars.forEach((bankIdx, barPos) => {
+    const barOffset = barPos * TOTAL_STEPS * TICKS_PER_STEP;
+    const bankOff   = bankIdx * TOTAL_STEPS;
+    for (let s = 0; s < TOTAL_STEPS; s++) {
+      const t = barOffset + stepTickSwung(s, swing);
+      for (const [name, note] of Object.entries(DRUM_NOTES)) {
+        const v = tracks[name][bankOff + s];
+        if (v > 0) {
+          const vel = (v === 2) ? VEL_LOUD : VEL_SOFT;
+          drumEvents.push({ tick: t,            kind: "on",  note, vel });
+          drumEvents.push({ tick: t + DRUM_DUR, kind: "off", note, vel: 0 });
+        }
+      }
+    }
+  });
+
+  // Melody
+  const melodyEvents = [];
+  bars.forEach((bankIdx, barPos) => {
+    const barOffset = barPos * TOTAL_STEPS * TICKS_PER_STEP;
+    const bankOff   = bankIdx * TOTAL_STEPS;
+    for (let s = 0; s < TOTAL_STEPS; s++) {
+      const t = barOffset + stepTickSwung(s, swing);
+      const v = tracks.melody[bankOff + s];
+      if (v > 0) {
+        const note = MELODY_BASE_MIDI + (v - 1);
+        melodyEvents.push({ tick: t,               kind: "on",  note, vel: VEL_LOUD });
+        melodyEvents.push({ tick: t + PITCHED_DUR, kind: "off", note, vel: 0 });
+      }
+    }
+  });
+
+  // Cowbell
+  const cowbellEvents = [];
+  bars.forEach((bankIdx, barPos) => {
+    const barOffset = barPos * TOTAL_STEPS * TICKS_PER_STEP;
+    const bankOff   = bankIdx * TOTAL_STEPS;
+    for (let s = 0; s < TOTAL_STEPS; s++) {
+      const t = barOffset + stepTickSwung(s, swing);
+      const v = tracks.cowbell[bankOff + s];
+      if (v > 0) {
+        const note = COWBELL_BASE_MIDI + (v - 1);
+        cowbellEvents.push({ tick: t,               kind: "on",  note, vel: VEL_LOUD });
+        cowbellEvents.push({ tick: t + PITCHED_DUR, kind: "off", note, vel: 0 });
+      }
+    }
+  });
+
+  // Build chunks (4 tracks: tempo + drums + melody + cowbell)
+  const numTracks = 4;
+  const header = [
+    ...ascii("MThd"),
+    ...u32be(6),
+    ...u16be(1),                 // format 1
+    ...u16be(numTracks),
+    ...u16be(TICKS_PER_QUARTER),
+  ];
+
+  const all = [
+    ...header,
+    ...tempoTrack(bpm),
+    ...trackChunk(drumEvents,    9, "Drums"),    // GM channel 10 = mido 9
+    ...trackChunk(melodyEvents,  0, "Melody"),
+    ...trackChunk(cowbellEvents, 2, "Cowbell"),
+  ];
+  return new Uint8Array(all);
+}
+
+// ─── UI ────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function showMsg(text, kind) {
+  const el = $("msg");
+  el.textContent = text;
+  el.className = "msg " + (kind || "");
+}
+
+function clearMsg() {
+  $("msg").textContent = "";
+  $("msg").className = "";
+}
+
+function updateInfo() {
+  clearMsg();
+  const text = $("input").value.trim();
+  if (!text) {
+    $("info").textContent = "貼り付けると、ここに BPM やバンク数などが表示されます。";
+    return null;
+  }
+  try {
+    const p = parseExport(text);
+    let nonEmpty = [];
+    for (const name of ["kick","snare","hihat","clap","cowbell","melody"]) {
+      const trkAny = p.tracks[name].some(b => b !== 0);
+      if (trkAny) nonEmpty.push(name);
+    }
+    $("info").innerHTML =
+      `<div><span class="key">BPM</span> ${p.bpm}</div>` +
+      `<div><span class="key">Swing</span> ${(p.swing*100).toFixed(0)}% ${p.swing===0.5?"(Off)":""}</div>` +
+      `<div><span class="key">Chain</span> ${p.chain} bar(s)</div>` +
+      `<div><span class="key">Tracks</span> ${nonEmpty.join(", ") || "(全空)"}</div>`;
+    return p;
+  } catch (e) {
+    $("info").textContent = "(まだ有効なデータが読めていません)";
+    showMsg("エラー: " + e.message, "error");
+    return null;
+  }
+}
+
+function resolveBars(parsed) {
+  const mode = $("bars-mode").value;
+  if (mode === "custom") {
+    const txt = $("bars-custom").value.trim();
+    if (!txt) throw new Error("カスタム指定が空です。");
+    const arr = txt.split(",").map(s => parseInt(s.trim(), 10));
+    if (arr.some(n => isNaN(n) || n < 0 || n >= BANK_COUNT)) {
+      throw new Error(`カスタム指定はカンマ区切りで 0..${BANK_COUNT-1} の範囲にしてください。`);
+    }
+    return arr;
+  }
+  const c = parsed.chain;
+  if (c === 4) return [0,1,2,3];
+  if (c === 2) return [0,1];
+  return [0];
+}
+
+function download() {
+  clearMsg();
+  let parsed;
+  try {
+    parsed = parseExport($("input").value);
+  } catch (e) {
+    showMsg("エラー: " + e.message, "error");
+    return;
+  }
+  let bars;
+  try {
+    bars = resolveBars(parsed);
+  } catch (e) {
+    showMsg("エラー: " + e.message, "error");
+    return;
+  }
+  const midi = buildMidi(parsed, bars);
+  const blob = new Blob([midi], { type: "audio/midi" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  let name = $("filename").value.trim() || "loop.mid";
+  if (!/\.mid$/i.test(name)) name += ".mid";
+  a.href = url; a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showMsg(`${name} を生成しました (${bars.length} bar / ${parsed.bpm} BPM / Swing ${(parsed.swing*100).toFixed(0)}%)`, "ok");
+}
+
+// ─── Bind ──────────────────────────────────────────────────────────────────
+$("input").addEventListener("input", updateInfo);
+$("bars-mode").addEventListener("change", () => {
+  $("bars-custom").disabled = ($("bars-mode").value !== "custom");
+});
+$("download").addEventListener("click", download);
+</script>
+</body>
+</html>
